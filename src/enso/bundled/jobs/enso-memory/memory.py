@@ -647,7 +647,11 @@ def parse_result(output: str) -> Any:
 
 
 def validate(result: Any, batch: dict[str, Any]) -> list[dict[str, str]]:
-    """Turn the agent's picks into note lines; any mistake is returned to the agent."""
+    """Turn the agent's picks into note lines; every mistake is returned to the agent at once.
+
+    Problems name the entry and the rule, never the entry's text, so one follow-up can fix
+    them all without the message quoting transcript content.
+    """
     if not isinstance(result, dict) or set(result) != {"version", "batch_id", "entries"}:
         raise ValueError("return only version, batch_id, and entries")
     if result["version"] != 1 or result["batch_id"] != batch["batch_id"]:
@@ -655,32 +659,57 @@ def validate(result: Any, batch: dict[str, Any]) -> list[dict[str, str]]:
     if not isinstance(result["entries"], list) or len(result["entries"]) > MAX_ENTRIES:
         raise ValueError(f"entries must be a list of at most {MAX_ENTRIES}")
     sources = {record["source_id"]: record for record in batch["records"]}
-    return [entry_line(entry, sources, batch["start_at"]) for entry in result["entries"]]
+    lines, problems = [], []
+    for number, entry in enumerate(result["entries"], 1):
+        try:
+            lines.append(entry_line(entry, sources, batch["start_at"]))
+        except ValueError as error:
+            problems.append(f"entry {number}: {error}")
+    if problems:
+        raise ValueError("; ".join(problems))
+    return lines
+
+
+FORBIDDEN = ("[", "]", "<", ">")
+
+
+def text_problem(text: Any) -> str | None:
+    if not isinstance(text, str):
+        return "text must be a string"
+    if not 10 <= len(text) <= 900:
+        return "text must be 10 to 900 characters"
+    if text != text.strip():
+        return "text must not start or end with whitespace"
+    if any(ord(c) < 32 for c in text):
+        return "text must be one line without control characters"
+    if re.search(r"https?://", text):
+        return "text must not contain URLs"
+    if found := [c for c in FORBIDDEN if c in text]:
+        listed = " ".join(f"'{c}'" for c in found)
+        return f"text must not contain {listed} (no Markdown, tags, or arrows like ->)"
+    return None
 
 
 def entry_line(entry: Any, sources: dict[str, dict[str, Any]], start: str) -> dict[str, str]:
     if not isinstance(entry, dict) or set(entry) != {"source_id", "moment", "text", "notes"}:
-        raise ValueError("each entry needs exactly source_id, moment, text, and notes")
+        keys = sorted(entry) if isinstance(entry, dict) else []
+        missing = [k for k in ("source_id", "moment", "text", "notes") if k not in keys]
+        detail = f" (missing {', '.join(missing)})" if missing else ""
+        raise ValueError(f"needs exactly source_id, moment, text, and notes{detail}")
     source = sources.get(entry["source_id"]) if isinstance(entry["source_id"], str) else None
     if source is None:
-        raise ValueError("an entry cites an unknown source_id")
+        raise ValueError("cites an unknown source_id")
     if entry["moment"] not in ("user", "assistant"):
         raise ValueError("moment must be user or assistant")
     at = source["started_at" if entry["moment"] == "user" else "completed_at"]
     if at < start or not source[entry["moment"]]:
         raise ValueError("the chosen moment has no new text in that record")
     text = entry["text"]
-    if (
-        not isinstance(text, str)
-        or not 10 <= len(text) <= 900
-        or text != text.strip()
-        or any(ord(c) < 32 for c in text)
-        or re.search(r"https?://|\[|\]|<|>", text)
-    ):
-        raise ValueError("text must be one plain sentence without links or control characters")
+    if problem := text_problem(text):
+        raise ValueError(problem)
     notes = entry["notes"]
     if not isinstance(notes, list) or len(notes) > 3:
-        raise ValueError("notes must list at most three paths")
+        raise ValueError("notes must be a list of at most three paths (use [] for none)")
     links = []
     for path in dict.fromkeys(notes):
         if path not in source["related_notes"]:

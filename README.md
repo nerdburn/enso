@@ -59,7 +59,7 @@ a supported browser installed separately by you.
 Install Enso with one command:
 
 ```bash
-curl -fsSL https://github.com/geekforbrains/enso/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/nerdburn/enso/releases/latest/download/install.sh | sh
 ```
 
 The installer supplies Enso and its dependencies without a source checkout. Make

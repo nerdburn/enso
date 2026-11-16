@@ -5,6 +5,21 @@ All notable changes to Enso are documented here, following
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-16
+
+### Changed
+
+- Releases and update checks now come from the maintained fork at
+  [nerdburn/enso](https://github.com/nerdburn/enso). Existing homes keep their recorded feed
+  until it is changed.
+
+### Fixed
+
+- The memory job no longer fails when the agent's first two answers each break a different
+  rule. Rejections now list every problem at once, naming the entry and the rule (including the
+  banned `[`, `]`, `<`, and `>` characters), the prompt states those rules, and the job allows
+  two corrections.
+
 ## [0.5.0] - 2026-09-29
 
 ### Added

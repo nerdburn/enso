@@ -5,7 +5,7 @@ agent:
   provider: "{{provider}}"
   model: "{{model}}"
   effort: "{{effort}}"
-  max_followups: 1
+  max_followups: 2
 enabled: true
 gate:
   command: python3 memory.py gate
@@ -48,7 +48,8 @@ Return exactly this shape, with zero or more entries and no Markdown fence:
 
 {"version":1,"batch_id":"COPY_INPUT_BATCH_ID","entries":[{"source_id":"COPY_RECORD_ID","moment":"user","text":"One factual sentence.","notes":[]}]}
 
-Each text is a single line without URLs, Markdown links, or wikilinks; the script adds
-links. Every entry must cite a provided new record. An empty entries list is a valid result.
+Each text is a single line without URLs, Markdown links, or wikilinks, and never contains
+`[`, `]`, `<`, or `>` (write "to" instead of an arrow); the script adds links. Every entry
+needs all four fields, with `"notes": []` when it has none. Every entry must cite a provided new record. An empty entries list is a valid result.
 
 {{gate_output}}

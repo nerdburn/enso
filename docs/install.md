@@ -21,7 +21,7 @@ are installation details; scripts call Enso-owned operations through the CLI.
 Install Enso without cloning the repository:
 
 ```bash
-curl -fsSL https://github.com/geekforbrains/enso/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/nerdburn/enso/releases/latest/download/install.sh | sh
 ```
 
 To install from a downloaded release bundle, run this from its directory:

@@ -32,7 +32,7 @@ Settings have separate owners:
 
 Load `enso-workspace` for bindings and `enso-security` before changing provider permissions
 or handling credentials. Use `enso models` for OpenRouter model IDs when configuring OpenCode.
-The [configuration reference](https://github.com/geekforbrains/enso/blob/main/docs/configuration.md)
+The [configuration reference](https://github.com/nerdburn/enso/blob/main/docs/configuration.md)
 owns accepted settings; CLI help owns command syntax.
 
 Changes normally apply on the next turn or scheduler tick; running work keeps its snapshot.

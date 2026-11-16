@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 CONFIG_VERSION = 2
 LEGACY_HOME_MESSAGE = (
     "This Enso home predates 0.2.0; automatic migration is unsupported: "
-    "https://github.com/geekforbrains/enso/blob/develop/docs/migration.md"
+    "https://github.com/nerdburn/enso/blob/develop/docs/migration.md"
 )
 WORKSPACE_NAME_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 BINDING_KEY_RE = re.compile("|".join(f"(?:{spec.binding_pattern})" for spec in TRANSPORTS.values()))

@@ -29,7 +29,7 @@ from email.parser import BytesParser
 from pathlib import Path
 from typing import Any
 
-DEFAULT_FEED = "https://github.com/geekforbrains/enso/releases/latest/download/release.json"
+DEFAULT_FEED = "https://github.com/nerdburn/enso/releases/latest/download/release.json"
 MANIFEST_LIMIT = 64 * 1024
 CONSTRAINTS_LIMIT = 2 * 1024 * 1024
 WHEEL_LIMIT = 80 * 1024 * 1024

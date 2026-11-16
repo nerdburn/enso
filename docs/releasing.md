@@ -133,7 +133,7 @@ With `--artifact-base-url`, the generated installer defaults to `release.json` i
 version directory. `--feed-url` embeds the stable HTTPS feed for later update checks and
 requires `--artifact-base-url`. Explicit installer arguments override the embedded defaults.
 Without a feed, installs use `DEFAULT_FEED` from `src/enso/releases.py`, the official
-`https://github.com/geekforbrains/enso/releases/latest/download/release.json` endpoint.
+`https://github.com/nerdburn/enso/releases/latest/download/release.json` endpoint.
 This also applies to local bundles. Without an artifact base, the installer still requires
 `--manifest`. Build the public bundle with a version-pinned artifact base; `--feed-url`
 is available for private/staging feeds. A recorded feed always wins over the default on
@@ -261,7 +261,7 @@ Release dependencies are installed with uv's copy link mode, independent of the 
 Completed updates can clear that cache without retaining historical wheel contents.
 
 ```bash
-curl -fsSL https://github.com/geekforbrains/enso/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/nerdburn/enso/releases/latest/download/install.sh | sh
 ```
 
 For publication verification, replace `| sh` with `| sh -s -- --home "$release_smoke/home"

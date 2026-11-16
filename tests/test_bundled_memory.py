@@ -204,6 +204,33 @@ def test_merge_sorts_entries_and_keeps_edits():
     assert memory.merge(edited, [early]) == f"{edited}{early}\n"
 
 
+def test_validation_reports_every_problem_without_quoting_text():
+    record = {
+        "source_id": "claude:abc:1",
+        "started_at": "2026-11-16T18:00:00.000000+00:00",
+        "completed_at": "2026-11-16T18:01:00.000000+00:00",
+        "user": "Ship it.",
+        "assistant": "Shipped.",
+        "related_notes": [],
+    }
+    batch = {"batch_id": "b1", "start_at": "2026-11-16T00:00:00.000000+00:00", "records": [record]}
+    ok = {"source_id": "claude:abc:1", "moment": "user", "text": "Ada asked to ship it."}
+    ok["notes"] = []
+    no_notes = {key: value for key, value in ok.items() if key != "notes"}
+    arrow = {**ok, "moment": "assistant", "text": "Moved the deploy from staging -> prod."}
+    result = {"version": 1, "batch_id": "b1", "entries": [ok, no_notes, arrow]}
+
+    with pytest.raises(ValueError) as caught:
+        memory.validate(result, batch)
+
+    message = str(caught.value)
+    assert message.startswith("entry 2: needs exactly source_id, moment, text, and notes")
+    assert "(missing notes)" in message
+    assert "entry 3: text must not contain '>'" in message
+    assert "entry 1" not in message and "staging" not in message
+    assert len(memory.validate({**result, "entries": [ok]}, batch)) == 1
+
+
 def run_hook(mode: str, env: dict, stdin: str = "") -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(env["JOB_DIR"] / "memory.py"), mode],

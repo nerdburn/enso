@@ -1,6 +1,6 @@
 [project]
 name = "enso"
-version = "0.5.0"
+version = "0.5.1"
 description = "A personal AI assistant that runs on your machine, connects to your chat, and keeps work moving."
 readme = "README.md"
 license = "MIT"
@@ -26,10 +26,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/geekforbrains/enso"
-Repository = "https://github.com/geekforbrains/enso"
-Changelog = "https://github.com/geekforbrains/enso/blob/main/CHANGELOG.md"
-Issues = "https://github.com/geekforbrains/enso/issues"
+Homepage = "https://github.com/nerdburn/enso"
+Repository = "https://github.com/nerdburn/enso"
+Changelog = "https://github.com/nerdburn/enso/blob/main/CHANGELOG.md"
+Issues = "https://github.com/nerdburn/enso/issues"
 
 [project.optional-dependencies]
 slack = ["slack-bolt>=1.28", "aiohttp>=3.9"]
