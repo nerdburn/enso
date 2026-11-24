@@ -875,6 +875,157 @@ async def test_stopping_a_stage_run_releases_the_claim(
     assert any("cancelled" in message for _, message in events(enso_home, "EN-001"))
 
 
+async def claimed_run(paths: Paths, ref: str = "EN-001") -> str:
+    """Wait until a started stage run holds the task; its run id."""
+    for _ in range(200):
+        await asyncio.sleep(0.05)
+        if run_id := tasks.get(paths, ref).claim_run_id:
+            return run_id
+    raise AssertionError(f"{ref} was never claimed")
+
+
+async def test_a_person_stops_one_running_agent_and_the_task_stays_blocked(
+    enso_home: Paths, stage_config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the requested run ends; its provider is terminated and nothing re-claims the task."""
+    monkeypatch.setattr(runner_module, "STOP_POLL_SECONDS", 0.05)
+    runner = JobRunner(stage_config, {"slack": FakeTransport()})
+    tasks.create(enso_home, stage_config, "EN", "Fix fences", actor="user:gavin")
+    write_job(enso_home, "other", prompt="sleep 1")
+    other = runner.start(load_job(enso_home, stage_config, "other"), trigger="manual")
+    job = dev_job(enso_home, stage_config, prompt="sleep 30", timeout=60)
+    run = runner.start(job, trigger="ready")
+    run_id = await claimed_run(enso_home)
+    await asyncio.sleep(0.3)  # let the provider process start
+    started = asyncio.get_running_loop().time()
+    request = tasks.request_stop(
+        enso_home, "EN-001", actor="slack:U1", run_id=None, message="Wrong approach; wait for me"
+    )
+    result = await asyncio.wait_for(run, 10)
+    assert asyncio.get_running_loop().time() - started < 8  # not the 30 s the provider wanted
+    assert not run.cancelled() and result.status == "error" and result.task == "EN-001"
+    assert result.error == "stopped by slack:U1: Wrong approach; wait for me"
+    stored = runs.get(enso_home, run_id)
+    assert stored is not None and (stored.status, stored.error) == ("error", result.error)
+
+    stopped = tasks.get(enso_home, "EN-001")
+    assert (stopped.stage, stopped.previous_stage) == ("blocked", "triage")
+    assert stopped.claim_run_id is None and not stopped.attention
+    block = tasks.events(enso_home, "EN-001")[0]
+    assert (block.kind, block.actor, block.run_id) == ("moved", "slack:U1", run_id)
+    assert block.message == "Wrong approach; wait for me"
+    assert block.payload["move"] == "block" and block.payload["block"] == "stopped"
+    transaction = workflows.history(enso_home, "EN-001")[0]
+    assert (transaction["status"], transaction["block"]) == ("blocked", "stopped")
+    assert transaction["error"] == "Wrong approach; wait for me"
+    assert tasks.stopped(enso_home, request)
+
+    # Blocked work is not ready, so the scheduler leaves it until a person resumes it.
+    assert not tasks.ready(enso_home, stage_config, "EN", "triage")
+    await runner.tick(NOW)
+    assert job.ref not in runner.running()
+    assert (await asyncio.wait_for(other, 10)).status == "ok"  # the other run was untouched
+    resumed = tasks.move(enso_home, stage_config, "EN-001", "resume", actor="slack:U1", run_id=None)
+    assert resumed.stage == "triage" and tasks.ready(enso_home, stage_config, "EN", "triage")
+    assert tasks.stop_request(enso_home, "EN-001", run_id) is None
+
+
+async def test_stopping_a_command_stage_fires_the_blocked_hook(
+    enso_home: Paths, raw_config: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runner_module, "STOP_POLL_SECONDS", 0.05)
+    seen = enso_home.home / "hook.txt"
+    config = workflow_config(
+        enso_home,
+        raw_config,
+        [{"name": "work", "command": "sleep 30; touch finished"}],
+        hooks={"after:blocked": f'printf "%s|%s" "$ENSO_BLOCK_KIND" "$ENSO_MESSAGE" > {seen}'},
+    )
+    task = tasks.create(enso_home, config, "EN", "Long build", actor="user:test")
+    transport = FakeTransport("slack")
+    runner = JobRunner(config, {"slack": transport})
+    run = runner.start(stage_job(enso_home, config, timeout=60), trigger="ready")
+    await claimed_run(enso_home, task.ref)
+    await asyncio.sleep(0.2)
+    tasks.request_stop(enso_home, task.ref, actor="user:gavin", run_id=None, message="Not today")
+    result = await asyncio.wait_for(run, 10)
+    assert result.status == "error" and result.error == "stopped by user:gavin: Not today"
+    stopped = tasks.get(enso_home, task.ref)
+    assert (stopped.stage, stopped.claim_run_id) == ("blocked", None)
+    assert not (enso_home.project("default", "EN") / "finished").exists()
+    delivered = [(e["name"], e["status"]) for e in workflows.event_history(enso_home, task.ref)]
+    assert delivered == [("after:blocked", "delivered")]
+    assert seen.read_text() == "stopped|Not today"
+    assert transport.sent == []  # the hook owns the notice, as for any other block
+
+
+async def test_a_stop_after_a_submitted_handoff_blocks_instead_of_accepting(
+    enso_home: Paths, raw_config: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A submission still holds the claim, so the stop wins and its checks never run."""
+    monkeypatch.setattr(runner_module, "STOP_POLL_SECONDS", 0.01)
+    config = workflow_config(
+        enso_home,
+        raw_config,
+        [{"name": "work", "checks": [{"name": "slow", "command": "sleep 30; touch check-ran"}]}],
+    )
+    task = tasks.create(enso_home, config, "EN", "Submitted", actor="user:test")
+
+    async def turn(*args: object, **kwargs: object) -> ProviderTurn:
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        submit(enso_home, config, env)
+        tasks.request_stop(enso_home, task.ref, actor="user:gavin", run_id=None, message="Hold")
+        return ProviderTurn("ok", output="done", exit_code=0)
+
+    monkeypatch.setattr(runner_module.execution, "execute_turn", turn)
+    result = await asyncio.wait_for(
+        JobRunner(config).run(stage_job(enso_home, config), trigger="manual"), 10
+    )
+    assert result.error == "stopped by user:gavin: Hold"
+    stopped = tasks.get(enso_home, task.ref)
+    assert (stopped.stage, stopped.claim_run_id) == ("blocked", None)
+    assert tasks.events(enso_home, task.ref)[0].payload["block"] == "stopped"
+    assert not any(event.kind == "accepted" for event in tasks.events(enso_home, task.ref))
+    assert not (enso_home.project("default", "EN") / "check-ran").exists()
+
+
+async def test_a_stop_the_run_outruns_is_ignored_and_never_reaches_the_next_run(
+    enso_home: Paths, raw_config: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The run finishes between two polls: its handoff stands and the request goes stale."""
+    monkeypatch.setattr(runner_module, "STOP_POLL_SECONDS", 30)
+    config = workflow_config(enso_home, raw_config, ["work", "review"])
+    task = tasks.create(enso_home, config, "EN", "Nearly done", actor="user:test")
+    requests: list[tasks.StopRequest] = []
+
+    async def turn(*args: object, **kwargs: object) -> ProviderTurn:
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        if not requests:  # the first run only, after its watch has already looked once
+            await asyncio.sleep(0.3)
+            requests.append(
+                tasks.request_stop(
+                    enso_home, task.ref, actor="user:gavin", run_id=None, message="Too late"
+                )
+            )
+        submit(enso_home, config, env)
+        return ProviderTurn("ok", output="done", exit_code=0)
+
+    monkeypatch.setattr(runner_module.execution, "execute_turn", turn)
+    runner = JobRunner(config)
+    first = await runner.run(stage_job(enso_home, config), trigger="manual")
+    assert first.status == "ok", first.error
+    assert tasks.get(enso_home, task.ref).stage == "review"
+    assert not tasks.stopped(enso_home, requests[0])
+    monkeypatch.setattr(runner_module, "STOP_POLL_SECONDS", 0.01)
+    second = await runner.run(stage_job(enso_home, config, name="review"), trigger="manual")
+    assert second.status == "ok", second.error
+    finished = tasks.get(enso_home, task.ref)
+    assert finished.stage == "done" and finished.claim_run_id is None
+    assert not any(e.payload.get("move") == "block" for e in tasks.events(enso_home, task.ref))
+
+
 async def test_stopping_a_stage_run_during_setup_keeps_ownership_until_setup_stops(
     enso_home: Paths, stage_config: Config, raw_config_both: dict
 ) -> None:

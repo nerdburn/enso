@@ -5,6 +5,17 @@ All notable changes to Enso are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- `enso task add` accepts `--ref KIND:VALUE` to attach refs as the task is created, and
+  `--unique-ref KIND:VALUE` to refuse a second unfinished task carrying the same ref, so an
+  external tracker can keep one open task per ticket.
+- `enso task stop REF --message TEXT` lets a person, at a terminal or in chat, end the one
+  run working on a task without stopping the service. The run's owner terminates only that
+  provider or stage command and leaves the task blocked and unclaimed with the message as
+  the reason, the person as the actor, and the new block kind `stopped`; `after:blocked`
+  hooks see `ENSO_BLOCK_KIND=stopped`. Hooks that branch on the block kind should handle it.
+
 ## [0.5.1] - 2026-11-16
 
 ### Changed

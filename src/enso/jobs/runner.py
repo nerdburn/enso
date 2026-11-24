@@ -7,11 +7,12 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import IO, Literal
+from typing import IO, Any, Literal
 
 from .. import db, execution, messages, routing, runs, secrets, tasks, workflows
 from .. import log as logctx
@@ -35,6 +36,7 @@ log = logging.getLogger(__name__)
 FAILURE_RENOTIFY_SECONDS = 24 * 3600
 POSTRUN_FEEDBACK_LIMIT = 64 * 1024
 INTERRUPTED_ERROR = "interrupted (enso exited before the run finished)"
+STOP_POLL_SECONDS = 1.0  # how often a stage run looks for a person's stop request
 
 Decision = Literal["first", "wait", "fire", "misfire"]
 
@@ -367,6 +369,7 @@ class JobRunner:
         started = time.monotonic()
         resource_locks: list[IO[str]] = []
         stage: taskflow.StageRun | None = None
+        stop: tasks.StopRequest | None = None
         gate: Gate | None = None
         try:
             self._run_env[run_id] = {
@@ -394,8 +397,12 @@ class JobRunner:
                     if early is not None:
                         result = early
                     else:
-                        result = await self._turns(
-                            job, run_id, gate.output, effort, started, stage, config=config
+                        result, stop = await self._until_stopped(
+                            stage,
+                            run_id,
+                            self._turns(
+                                job, run_id, gate.output, effort, started, stage, config=config
+                            ),
                         )
             if job.postrun and result.status in ("no_work", "gate_error", "skipped"):
                 hook = await self._postrun(
@@ -406,7 +413,9 @@ class JobRunner:
                 result = checked
             if stage is not None:
                 result = replace(result, task=stage.task.ref)
-                await self._settle(stage, run_id, result.status, config=config, error=result.error)
+                await self._settle(
+                    stage, run_id, result.status, config=config, error=result.error, stop=stop
+                )
                 await workflows.drain_events(self.paths, config, ref=stage.task.ref)
                 stage = taskflow.end_ownership(stage)
             await execution.run_sync(self._finish, result, config)
@@ -593,6 +602,68 @@ class JobRunner:
                 return replace(result, status="timeout", error="provider time budget exhausted")
             prompt, session_id = feedback, result.session_id
             attempt += 1
+
+    async def _until_stopped(
+        self,
+        stage: taskflow.StageRun | None,
+        run_id: str,
+        work: Coroutine[Any, Any, RunResult],
+    ) -> tuple[RunResult, tasks.StopRequest | None]:
+        """Run a stage's work beside a watch for a person's request to stop this one run.
+
+        A request cancels only this run's work, which terminates its provider or command
+        process group exactly as a timeout or a service stop does; the caller then settles
+        the task with the request. Work that finishes on its own first keeps its result and
+        the request is ignored. Stopping the service still cancels the whole run.
+
+        Acceptance happens on this event loop, so the request is read once more here, with
+        no await before the cancel: a run whose handoff was just accepted is never cancelled
+        in the middle of its lifecycle hooks.
+        """
+        if stage is None:  # an ordinary job holds no task, so nothing can ask it to stop
+            return await work, None
+        turns = asyncio.create_task(work, name=f"turns:{run_id}")
+        watch = asyncio.create_task(self._stop_request(stage.task.ref, run_id))
+        try:
+            await asyncio.wait({turns, watch}, return_when=asyncio.FIRST_COMPLETED)
+            request = None if turns.done() else self._read_stop(stage.task.ref, run_id)
+            if request is not None:
+                turns.cancel()
+            else:
+                await asyncio.wait({turns})
+        finally:
+            # Join both before the caller settles or releases anything they may still use.
+            watch.cancel()
+            if not turns.done():
+                turns.cancel()
+            await execution.finish_cleanup(asyncio.gather(turns, watch, return_exceptions=True))
+        if request is None or not turns.cancelled():
+            if request is not None:
+                log.info("run=%s ended before its stop request took effect", run_id)
+            return turns.result(), None
+        log.info("run=%s stopped by %s", run_id, request.actor)
+        error = f"stopped by {request.actor}: {request.message}"
+        return RunResult("error", run_id, error=error), request
+
+    def _read_stop(self, ref: str, run_id: str) -> tasks.StopRequest | None:
+        """The request for this run while it still holds the task; None when unreadable."""
+        try:
+            return tasks.stop_request(self.paths, ref, run_id)
+        except (
+            tasks.TaskError,
+            sqlite3.Error,
+            OSError,
+            ValueError,
+            db.MissingDatabaseError,
+            db.UnreadableDatabaseError,
+        ):
+            log.debug("run=%s could not read stop requests", run_id, exc_info=True)
+            return None
+
+    async def _stop_request(self, ref: str, run_id: str) -> None:
+        """Poll until a person asks this run to stop; a failed read is tried again."""
+        while await asyncio.to_thread(self._read_stop, ref, run_id) is None:
+            await asyncio.sleep(STOP_POLL_SECONDS)
 
     async def _invoke(
         self,
@@ -781,10 +852,11 @@ class JobRunner:
         *,
         config: Config,
         error: str = "",
+        stop: tasks.StopRequest | None = None,
     ) -> None:
         """Release a claim the agent never handed off; best effort, so a crash cannot mask one."""
         try:
-            task = await taskflow.end(self.paths, config, stage, run_id, status, error)
+            task = await taskflow.end(self.paths, config, stage, run_id, status, error, stop)
         except tasks.TaskError, OSError:
             log.warning("run=%s could not release %s", run_id, stage.task.ref, exc_info=True)
             return

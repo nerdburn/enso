@@ -528,7 +528,9 @@ these attempts too. Rows without recorded attempts have an empty array.
 
 ## Tasks and projects
 
-`task add --route NAME` selects a declared path at intake. `task advance --output-file PATH`
+`task add --route NAME` selects a declared path at intake; `--unique-ref KIND:VALUE` refuses
+a second unfinished task for the same external item. `task stop REF --message TEXT` ends
+the one run working on a task and leaves the task blocked. `task advance --output-file PATH`
 submits a deliverable and can include a permitted `--route` decision. Human stages require
 `--approve DIGEST` from `task show`; JSON exposes path, inputs, output revisions and pending
 actions under `contract`. `workflow enable`, `adopt`, `reroute` and `resolve-event` are explicit
@@ -703,7 +705,7 @@ Lifecycle scripts below include setup, teardown, and after-transition hooks.
 | `ENSO_TRANSACTION_ID` / `ENSO_CANDIDATE` | workflow checks | Transaction and stable candidate being evaluated |
 | `ENSO_EVENT_ID` | lifecycle scripts | Stable event identity; use for idempotency/deduplication |
 | `ENSO_PROJECT` / `ENSO_FROM_STAGE` / `ENSO_TO_STAGE` | lifecycle scripts | Project and transition; setup/teardown use the current stage for both stage fields |
-| `ENSO_MESSAGE` / `ENSO_BLOCK_KIND` | lifecycle scripts | The move's handoff or block reason, and for a block its kind: `decision`, `approval`, or `failure` |
+| `ENSO_MESSAGE` / `ENSO_BLOCK_KIND` | lifecycle scripts | The move's handoff or block reason, and for a block its kind: `decision`, `approval`, `failure`, or `stopped` |
 | `ENSO_TASK_TITLE` | lifecycle scripts | The task's title (untrusted text) |
 | `ENSO_BRANCH` / `ENSO_BASE` | lifecycle scripts | Recorded task branch and target |
 | `ENSO_ATTEMPT` | workflow checks and lifecycle scripts | Current verification or delivery attempt |

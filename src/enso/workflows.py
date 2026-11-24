@@ -977,21 +977,40 @@ def accept_immediate(
     return tasks._load(con, task.ref)
 
 
-def interrupt(paths: Paths, config: Config, ref: str, run_id: str, reason: str) -> None:
+def interrupt(
+    paths: Paths,
+    config: Config,
+    ref: str,
+    run_id: str,
+    reason: str,
+    *,
+    actor: str = tasks.ENSO_ACTOR,
+    block: str | None = None,
+) -> None:
+    """Block an unaccepted run's task; ``actor`` and ``block`` name a person's stop.
+
+    A failure keeps the first diagnostic the transaction recorded and is flagged for
+    attention. A stop is the person's own decision: their reason replaces any repair
+    feedback, the move is theirs, and nothing is flagged. The writer's explicit block, when
+    it made one before ending, keeps its own reason either way.
+    """
     with db.transaction(paths) as con:
         tx = _read(con, ref, run_id)
         if tx is not None and tx["status"] == "accepted":
             return
         task = tasks._load(con, ref)
+        kind = block or "failure"
         if tx:
-            _finish_blocked_handoff(con, tx)
+            if _finish_blocked_handoff(con, tx) is not None:
+                block = None
             for result in tx["checks"]:
                 if result["status"] == "running":
                     result.update(status="interrupted", error=reason)
+            kind = block or tx.get("block") or "failure"
             tx.update(
                 status="blocked",
-                block=tx.get("block") or "failure",
-                error=tx["error"] or reason,
+                block=kind,
+                error=reason if block else tx["error"] or reason,
                 ended_at=db.now(),
             )
             _save(con, tx)
@@ -1001,14 +1020,14 @@ def interrupt(paths: Paths, config: Config, ref: str, run_id: str, reason: str) 
                 task,
                 "block",
                 "blocked",
-                actor=tasks.ENSO_ACTOR,
+                actor=actor,
                 run_id=run_id,
                 message=tx["error"] if tx else reason,
                 after_ref=None,
-                attention=True,
+                attention=block is None,
                 config=config,
                 transaction_id=tx["id"] if tx else None,
-                block=tx["block"] if tx else "failure",
+                block=kind,
             )
 
 

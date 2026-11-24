@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
 from conftest import commit_file, edit_project, git
 from typer.testing import CliRunner
 
-from enso import tasks, worktrees
+from enso import db, tasks, workflows, worktrees
 from enso.cli import app
 from enso.config import Config, Paths, load_config
+from enso.jobs import taskflow
 
 runner = CliRunner()
 
@@ -125,6 +127,115 @@ def test_moves_from_the_terminal(enso_home: Paths, project_config: Config) -> No
     assert code == 0 and out == "drop EN-002: cancelled — dependency\n"
     code, _, err = run("drop", "EN-2", "--message", "again")
     assert code == 1 and err == "error: cannot drop EN-002: EN-002 is cancelled\n"
+
+
+def claim_live(paths: Paths, config: Config, run_id: str = "r1") -> None:
+    """Claim EN-001 for a run whose row is still ``running``."""
+    with db.transaction(paths) as con:
+        con.execute(
+            "INSERT INTO runs (id, job, workspace, kind, trigger, started_at, status) "
+            "VALUES (?, 'dev', 'default', 'agent', 'ready', ?, 'running')",
+            (run_id, db.now()),
+        )
+    assert tasks.take(paths, config, "EN", "triage", run_id=run_id, actor="job:default:dev")
+
+
+def test_stop_refuses_without_a_live_run_and_inside_a_run(
+    enso_home: Paths, project_config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    add()
+    code, _, err = run("stop", "EN-1")
+    assert code == 2 and "--message" in err
+    code, _, err = run("stop", "EN-1", "--message", "halt")
+    assert code == 1 and err == (
+        "error: EN-001 is triage and no run holds it: nothing to stop; use enso task block "
+        "to park it or enso task drop to cancel it\n"
+    )
+    code, out, _ = run("stop", "EN-9", "--message", "halt", "--json")
+    assert code == 1 and json.loads(out) == {"ok": False, "error": "no task EN-009"}
+    claim_live(enso_home, project_config)
+    monkeypatch.setenv("ENSO_RUN_ID", "r2")
+    monkeypatch.setenv("ENSO_JOB", "default:other")
+    code, out, _ = run("stop", "EN-1", "--message", "halt", "--json")
+    assert code == 1 and json.loads(out)["error"].startswith("a run cannot stop a run")
+    assert tasks.stop_request(enso_home, "EN-001", "r1") is None
+
+
+def test_stop_requests_then_reports_how_the_run_ended(
+    enso_home: Paths, project_config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    add()
+    claim_live(enso_home, project_config)
+    monkeypatch.setenv("ENSO_ORIGIN_TRANSPORT", "slack")
+    monkeypatch.setenv("ENSO_ORIGIN_USER_ID", "U1")
+    code, out, _ = run("stop", "EN-1", "--message", "-", "--wait", "0", input="Wrong approach\n")
+    assert code == 0 and out == (
+        "stop requested for EN-001 (run r1); the run has not ended yet. "
+        "Check enso task show EN-001\n"
+    )
+    request = tasks.stop_request(enso_home, "EN-001", "r1")
+    assert request is not None
+    assert (request.actor, request.message) == ("slack:U1", "Wrong approach")
+    code, out, _ = run("stop", "EN-1", "--message", "again", "--wait", "0", "--json")
+    answer = json.loads(out)
+    assert code == 0 and answer["claim_run_id"] == "r1"
+    assert answer["stop"] == {**request.as_dict(), "state": "requested"}
+
+    # The run's owner settles the request while a second command waits for it.
+    workflows.start(enso_home, project_config, "EN-001", "r1")
+    settle = threading.Timer(
+        0.3, taskflow._end, (enso_home, project_config, "EN-001", "r1", "error", "", request)
+    )
+    settle.start()
+    try:
+        code, out, _ = run("stop", "EN-1", "--message", "again", "--wait", "10")
+    finally:
+        settle.join()
+    assert code == 0 and out == "stopped EN-001: blocked — Fix fences\n"
+    stopped = tasks.get(enso_home, "EN-001")
+    assert (stopped.stage, stopped.claim_run_id, stopped.attention) == ("blocked", None, False)
+    event = tasks.events(enso_home, "EN-001")[0]
+    assert (event.kind, event.actor, event.message) == ("moved", "slack:U1", "Wrong approach")
+    assert event.payload["block"] == "stopped"
+    code, _, err = run("stop", "EN-1", "--message", "again")
+    assert code == 1 and "blocked and no run holds it" in err
+    code, out, _ = run("resume", "EN-1", "--json")
+    assert code == 0 and json.loads(out)["stage"] == "triage"
+
+
+def test_add_attaches_refs_and_refuses_a_held_unique_ref(
+    enso_home: Paths, project_config: Config
+) -> None:
+    task = add("Ticket", "--unique-ref", "ticket:MC-123", "--ref", "url:https://example.test/1")
+    assert task["ref"] == "EN-001"
+    assert [(r.kind, r.value) for r in tasks.refs(enso_home, "EN-001")] == [
+        ("ticket", "MC-123"),
+        ("url", "https://example.test/1"),
+    ]
+    code, out, err = run("add", "Again", "--project", "EN", "--unique-ref", "ticket:MC-123")
+    message = "unfinished task EN-001 (triage) already carries ticket:MC-123; nothing was created"
+    assert (code, out, err) == (1, "", f"error: {message}\n")
+    code, out, err = run(
+        "add", "Again", "--project", "MKT", "--unique-ref", "ticket:MC-123", "--json"
+    )
+    refused = json.loads(out)
+    assert code == 1 and err == ""
+    assert refused == {"ok": False, "error": message, "existing": refused["existing"]}
+    assert refused["existing"] == tasks.get(enso_home, "EN-001").as_dict()
+    assert [t.ref for t in tasks.list_tasks(enso_home, all=True)] == ["EN-001"]
+    for flag in ("--ref", "--unique-ref"):
+        code, out, _ = run("add", "x", "--project", "EN", flag, "nocolon", "--json")
+        assert code == 1 and json.loads(out) == {
+            "ok": False,
+            "error": f"{flag} takes KIND:VALUE, got 'nocolon'",
+        }
+        code, out, _ = run("add", "x", "--project", "EN", flag, "Bad:x", "--json")
+        assert code == 1 and "'Bad' is not a ref kind" in json.loads(out)["error"]
+    # A finished holder no longer blocks the ticket's next task.
+    code, _, _ = run("drop", "EN-1", "--message", "superseded")
+    assert code == 0
+    code, out, _ = run("add", "Again", "--project", "EN", "--unique-ref", "ticket:MC-123")
+    assert code == 0 and out == "created EN-002: triage — Again\n"
 
 
 @pytest.fixture

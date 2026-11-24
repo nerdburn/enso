@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import time
 from datetime import timedelta
 from pathlib import Path
 
@@ -36,8 +37,15 @@ task_app = typer.Typer(no_args_is_help=True, help="Tasks: the board stage jobs w
 
 MESSAGE_HELP = "The handoff: what changed, the evidence, what comes next; - reads stdin."
 FORCE_HELP = "Override another run's claim (a person only, never inside a run)."
+STOP_WAIT_SECONDS = 15.0  # how long ``task stop`` watches for the run to end by default
+STOP_POLL_SECONDS = 0.2
 BODY_FILE = typer.Option(None, "--body-file", help="The spec from a file, or - for stdin.")
 REFS = typer.Option([], "--ref", help="Evidence as KIND:VALUE; repeatable.")
+UNIQUE_REFS = typer.Option(
+    [],
+    "--unique-ref",
+    help="A ref as KIND:VALUE that no other unfinished task may carry; repeatable.",
+)
 
 
 def _scope(
@@ -94,12 +102,12 @@ def _duration(value: str | None, *, as_json: bool) -> timedelta | None:
     return span
 
 
-def _parse_refs(values: list[str], *, as_json: bool) -> list[tuple[str, str]]:
+def _parse_refs(values: list[str], *, as_json: bool, flag: str = "--ref") -> list[tuple[str, str]]:
     pairs = []
     for value in values:
         kind, sep, ref_value = value.partition(":")
         if not sep or not kind or not ref_value:
-            fail([f"--ref takes KIND:VALUE, got {value!r}"], as_json=as_json)
+            fail([f"{flag} takes KIND:VALUE, got {value!r}"], as_json=as_json)
         pairs.append((kind, ref_value))
     return pairs
 
@@ -183,6 +191,8 @@ def task_add(
         None, "--after", help="Start blocked on this task; resumed when it is done."
     ),
     from_ref: str | None = typer.Option(None, "--from", help="The task this was found in."),
+    refs: list[str] = REFS,
+    unique_refs: list[str] = UNIQUE_REFS,
     workspace: str | None = WORKSPACE,
     as_json: bool = JSON_FLAG,
 ) -> None:
@@ -208,8 +218,16 @@ def task_add(
             route=route,
             after=after,
             from_ref=from_ref,
+            refs=_parse_refs(refs, as_json=as_json),
+            unique_refs=_parse_refs(unique_refs, as_json=as_json, flag="--unique-ref"),
             actor=tasks.actor_from_env(os.environ),
         )
+    except tasks.DuplicateRefError as exc:
+        if not as_json:
+            fail([str(exc)], as_json=False)
+        # The error contract, plus the task that already answers for the ref.
+        echo_json({"ok": False, "error": str(exc), "existing": exc.existing.as_dict()})
+        raise typer.Exit(1) from None
     except (tasks.TaskError, ValueError, OSError) as exc:
         fail([str(exc)], as_json=as_json)
     _emit(task, as_json=as_json, verb="created")
@@ -406,6 +424,61 @@ def task_drop(
 ) -> None:
     """Cancel a task; a person only."""
     _move(ref, "drop", workspace=workspace, message=message, as_json=as_json)
+
+
+@task_app.command("stop")
+def task_stop(
+    ref: str,
+    message: str = typer.Option(
+        ..., "--message", help="Why the run is stopped; becomes the block reason. - reads stdin."
+    ),
+    wait: float = typer.Option(
+        STOP_WAIT_SECONDS, "--wait", min=0, help="Seconds to wait for the run to end; 0 returns."
+    ),
+    workspace: str | None = WORKSPACE,
+    as_json: bool = JSON_FLAG,
+) -> None:
+    """End the one run working on a task and leave the task blocked; a person only.
+
+    The run's own process ends its work and blocks the task with the message; other runs
+    and the service continue. A task no run holds is refused: block or drop it instead.
+    """
+    paths = Paths.from_env()
+    config = load(paths, as_json=as_json)
+    _scope(paths, config, workspace, ref=ref, as_json=as_json)
+    try:
+        request = tasks.request_stop(
+            paths,
+            ref,
+            actor=tasks.actor_from_env(os.environ),
+            run_id=tasks.in_run(os.environ),
+            message=_text(message, as_json=as_json) or "",
+        )
+        deadline = time.monotonic() + wait
+        while (task := tasks.get(paths, ref)).claim_run_id == request.run_id:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(STOP_POLL_SECONDS)
+        if task.claim_run_id == request.run_id:
+            state = "requested"
+        else:
+            state = "stopped" if tasks.stopped(paths, request) else "ended"
+    except (tasks.TaskError, ValueError, OSError) as exc:
+        fail([str(exc)], as_json=as_json)
+    if as_json:
+        echo_json({**task.as_dict(), "stop": {**request.as_dict(), "state": state}})
+    elif state == "stopped":
+        _emit(task, as_json=False, verb="stopped")
+    elif state == "requested":
+        typer.echo(
+            f"stop requested for {task.ref} (run {request.run_id}); the run has not ended "
+            f"yet. Check enso task show {task.ref}"
+        )
+    else:
+        typer.echo(
+            f"{task.ref}: run {request.run_id} ended before the stop took effect; "
+            f"the task is {task.stage}"
+        )
 
 
 @task_app.command("release")

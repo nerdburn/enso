@@ -19,7 +19,7 @@ and `workflow` commands. [Configuration](configuration.md#projects) owns `PROJEC
 | after | A task this one waits on while blocked; `add --after` starts it blocked |
 | from | The task this one was discovered in |
 | claim | The run holding the task, its actor, and when; empty when nobody holds it |
-| timeline | Events, newest first: `created`, `taken`, `released`, `moved`, `edited`, `noted`, `ref`, the workflow's `submitted`, `accepted`, `rules_approved`, `workflow_reset`, and `workflow_recovered`, and the worktree's `worktree_setup`, `worktree_adopted`, `worktree_teardown`, `worktree_removed`, and `worktree_cleanup`; each with its actor, run id, message, and payload |
+| timeline | Events, newest first: `created`, `taken`, `released`, `moved`, `edited`, `noted`, `ref`, `stop_requested`, the workflow's `submitted`, `accepted`, `rules_approved`, `workflow_reset`, and `workflow_recovered`, and the worktree's `worktree_setup`, `worktree_adopted`, `worktree_teardown`, `worktree_removed`, and `worktree_cleanup`; each with its actor, run id, message, and payload |
 | refs | Evidence attached to the task: a `commit`, `path`, `url`, `page`, or any lowercase kind, with an opaque value |
 
 Tasks, events, refs, workflow transactions, check results, and lifecycle deliveries are never pruned. Finished tasks (`done` and `cancelled`) are hidden
@@ -154,8 +154,9 @@ approval and revisits the declared producing stage.
 
 Tasks blocked on a completed dependency resume to their interrupted stage through the same
 rules. Cancellation leaves dependants blocked and flagged for attention. Legacy/paused tasks
-remain inert. Blocks identify `decision`, `approval` (changed check files), or `failure`, also
-provided to lifecycle scripts in `ENSO_BLOCK_KIND`.
+remain inert. Blocks identify `decision`, `approval` (changed check files), `failure`, or
+`stopped` (a person [stopped the run](#stopping-a-running-task)), also provided to lifecycle
+scripts in `ENSO_BLOCK_KIND`.
 
 ## Claims and readiness
 
@@ -171,8 +172,8 @@ hold the same task. The claim is the run id and the actor `job:<workspace>:<job>
 second job or a person from moving the task underneath the run.
 
 Only the claiming run may move, release, or edit a claimed task's spec. A live execution
-claim cannot be forced: stop its job and let recovery release it first. Priority and `after`
-edits remain allowed on unfinished tasks.
+claim cannot be forced: [stop its run](#stopping-a-running-task) and let the runner release
+it first. Priority and `after` edits remain allowed on unfinished tasks.
 
 A submitted handoff holds the claim through validation and repair. A run that ends without
 one blocks the task with the cause as a `failure` and flags it for attention. If the task
@@ -182,6 +183,39 @@ timeline before continuing.
 
 `enso task release` clears a claim without moving. The claiming run can release it; a
 person needs `--force` and no live execution. To explain why work must wait, block it instead.
+
+### Stopping a running task
+
+`enso task stop REF --message TEXT` ends the one run that holds a task and leaves every other
+run and the service alone. A person runs it from a terminal or asks for it in chat. It never
+forces the claim: it records a `stop_requested` event naming the run, and the process that
+owns that run (the service, or an `enso job run` in a terminal) notices it within about a
+second, terminates that run's provider or stage command with its whole process group, as a
+timeout does, and settles the task through the usual end of a run. The task ends `blocked`
+and unclaimed, with the message as the reason, the person as the actor, and the block kind
+`stopped`; it is not flagged for attention, and `after:blocked` runs as for any other block
+(without that hook, a scheduled or ready stage job sends its usual
+[one-line alert](jobs.md#alerts)).
+The run is recorded as an `error` reading `stopped by <actor>: <message>`, and its `postrun`
+hook does not run. Blocked work is never ready, so nothing runs the task again until someone
+resumes it; `enso task resume REF` returns it to the stage it was stopped in.
+
+Agent, command, and integration stages stop the same way, including while acceptance checks
+run after a submitted handoff, which is then not accepted. An integration interrupted after
+its Git update follows the same recovery as one interrupted by a service stop.
+
+The command waits up to `--wait` seconds (15 by default; `0` returns at once) and reports one
+of three outcomes, all exit 0: `stopped REF: blocked — TITLE`; the request is recorded but
+the run has not ended yet; or the run ended by itself before the stop took effect, in which
+case its own outcome stands and the request is ignored. A request names its run, so it never
+applies to a later run of the same task, and asking twice for one run records one request.
+With `--json` the task object carries `stop`: the request (`ref`, `run_id`, `job`, `actor`,
+`message`, `requested_at`) and `state`, one of `stopped`, `requested`, or `ended`.
+
+It is refused, exit 1, when no run holds the task, with a pointer to `task block` and
+`task drop`; when the claim belongs to something other than a running job, such as a run
+that already ended or a manual verification; and inside a job run or lifecycle script, where
+a run blocks its own task instead and never stops another.
 
 ## Who is acting
 
@@ -367,7 +401,8 @@ never passed on and an untargeted `enso message send` goes to the configured not
 
 `hooks["after:blocked"]` is where a project tells people that work needs them. Every stage
 run that is not accepted blocks its task with the cause, so the hook sees agent blocks,
-refused handoffs, and failed runs alike; `ENSO_BLOCK_KIND` says which. While the hook is
+refused handoffs, failed runs, and runs a person stopped alike; `ENSO_BLOCK_KIND` says which.
+While the hook is
 defined, the stage job sends no alert of its own for those runs
 ([Jobs § Alerts](jobs.md#alerts)). A hook on a human stage, such as `hooks["after:qa"]`,
 tells people when work is ready for them.
@@ -536,11 +571,19 @@ appropriate [concurrency groups](jobs.md#concurrency-groups).
   that reference, with `Waiting on REF` on its `created` event, and is resumed into the
   first stage when that task is done. With `--backlog` it is parked as asked and the
   dependency is kept for whenever it is blocked.
+- `enso task add ... --ref KIND:VALUE` attaches refs in the transaction that creates the
+  task. `--unique-ref KIND:VALUE` attaches one too, but first refuses when an unfinished task
+  (any stage except `done` and `cancelled`) in any project or workspace already carries that
+  exact kind and value: nothing is created, and the error names that task and its stage. The
+  check and the creation share one immediate transaction, so concurrent callers cannot both
+  succeed. A finished holder does not block. Use it to keep one open task per external item,
+  such as `--unique-ref ticket:MC-123`. Only creation checks: `task ref` and `advance --ref`
+  never refuse a pair another task holds.
 
 ## The CLI
 
 ```text
-enso task add TITLE --project KEY [--body TEXT | --body-file PATH|-] [--priority N] [--route NAME] [--backlog] [--after REF] [--from REF] [--workspace W]
+enso task add TITLE --project KEY [--body TEXT | --body-file PATH|-] [--priority N] [--route NAME] [--backlog] [--after REF] [--from REF] [--ref KIND:VALUE ...] [--unique-ref KIND:VALUE ...] [--workspace W]
 enso task list [--project KEY] [--stage NAME] [--ready] [--claimed] [--attention] [--all] [--idle-for 30m] [--workspace W] [--all-workspaces]
 enso task show REF [--workspace W]
 enso task advance REF --message TEXT|- [--output-file PATH] [--route NAME] [--approve DIGEST] [--ref KIND:VALUE ...] [--force] [--workspace W]
@@ -548,6 +591,7 @@ enso task return REF --message TEXT|- [--force] [--workspace W]
 enso task block REF --message TEXT|- [--after REF] [--force] [--workspace W]
 enso task resume REF [--message TEXT|-] [--to STAGE] [--workspace W]
 enso task drop REF --message TEXT|- [--workspace W]
+enso task stop REF --message TEXT|- [--wait SECONDS] [--workspace W]
 enso task release REF --message TEXT|- [--force] [--workspace W]
 enso task edit REF [--title T] [--body-file PATH|-] [--priority N] [--after REF] [--force] [--workspace W]
 enso task note REF TEXT|- [--attention] [--workspace W]
@@ -569,7 +613,8 @@ enso project add KEY --name NAME [--workspace WS] [--repo PATH] [--stages a,b,c:
 
 Every command takes `--json` and follows the [JSON error contract](cli.md): a refused move or
 edit prints `{"ok": false, "error": "<reason>"}` and exits 1, and so does an unknown
-reference or project. A message of `-` or `--body-file -` reads stdin, so a handoff longer
+reference or project. An `add` refused by `--unique-ref` adds `existing`, the task object that
+holds the ref. A message of `-` or `--body-file -` reads stdin, so a handoff longer
 than a line needs no shell quoting; `--body` is literal text. Bodies and messages follow
 the [CLI input limits](cli.md). `--idle-for` takes `30m`, `2h`, or `1d`, and keeps tasks
 that entered their stage at least that long ago.

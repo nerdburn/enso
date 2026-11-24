@@ -43,7 +43,7 @@ Tell people when work needs them with `after:blocked` and a hook on each human s
 development preset's `notify.sh` sends one line for both. Every stage run that is not accepted
 blocks its task, and while `after:blocked` exists the stage job sends no alert of its own.
 Hooks get the reason in `ENSO_MESSAGE` and, for a block, `ENSO_BLOCK_KIND`: `decision`,
-`approval`, or `failure`.
+`approval`, `failure`, or `stopped` (a person ended the run with `task stop`).
 
 Before replacing a workflow, stop admissions, drain runs, and inspect task stages, return
 destinations, jobs, scripts, and worktrees. Preserve history, retained work, and disabled

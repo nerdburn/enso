@@ -591,6 +591,89 @@ def test_claim_guard_and_force(enso_home: Paths, project_config: Config) -> None
     assert tasks.get(enso_home, task.ref).claim_run_id == "r1"
 
 
+def running_run(paths: Paths, run_id: str) -> None:
+    """A ``running`` row, which is what makes a claim a live execution."""
+    with db.transaction(paths) as con:
+        con.execute(
+            "INSERT INTO runs (id, job, workspace, kind, trigger, started_at, status) "
+            "VALUES (?, 'dev', 'default', 'agent', 'ready', ?, 'running')",
+            (run_id, db.now()),
+        )
+
+
+def test_stop_request_needs_a_person_and_a_live_run(
+    enso_home: Paths, project_config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = add(enso_home, project_config)
+
+    def stop(**overrides: object) -> tasks.StopRequest:
+        given: dict = {"actor": "slack:U1", "run_id": None, "message": "Wrong approach"}
+        return tasks.request_stop(enso_home, task.ref, **{**given, **overrides})
+
+    with pytest.raises(TaskError, match=r"triage and no run holds it.*task block.*task drop"):
+        stop()
+    tasks.take(enso_home, project_config, "EN", "triage", run_id="r1", actor="job:default:dev")
+    with pytest.raises(TaskError, match="claimed by r1, which is not a running job"):
+        stop()  # a claim whose run row is gone belongs to recovery, not to a stop
+    running_run(enso_home, "r1")
+    with pytest.raises(TaskError, match="a run cannot stop a run"):
+        stop(actor="job:default:other", run_id="r2")
+    with pytest.raises(TaskError, match="a run cannot stop a run"):
+        stop(actor="job:default:dev", run_id="r1")
+    with pytest.raises(TaskError, match="stop needs a message"):
+        stop(message=" ")
+    monkeypatch.setenv("ENSO_LIFECYCLE", "1")
+    with pytest.raises(TaskError, match="lifecycle scripts cannot stop"):
+        stop()
+    monkeypatch.delenv("ENSO_LIFECYCLE")
+    assert tasks.stop_request(enso_home, task.ref, "r1") is None
+    assert "stop_requested" not in kinds(enso_home, task.ref)
+
+    request = stop()
+    assert (request.ref, request.run_id, request.job) == ("EN-001", "r1", "default:dev")
+    assert (request.actor, request.message) == ("slack:U1", "Wrong approach")
+    held = tasks.get(enso_home, task.ref)
+    assert (held.stage, held.claim_run_id) == ("triage", "r1")  # only the runner lets go
+    event = tasks.events(enso_home, task.ref)[0]
+    assert (event.kind, event.actor, event.run_id) == ("stop_requested", "slack:U1", None)
+    assert event.payload == {"run_id": "r1", "job": "default:dev"}
+    assert stop(actor="user:gavin", message="Me too") == request  # one request per run
+    assert kinds(enso_home, task.ref).count("stop_requested") == 1
+    assert tasks.stop_request(enso_home, task.ref, "r1") == request
+    assert tasks.stop_request(enso_home, task.ref, "r2") is None
+    assert not tasks.stopped(enso_home, request)
+    with pytest.raises(TaskError, match=r"cannot force a live execution claim.*enso task stop"):
+        tasks.move(
+            enso_home,
+            project_config,
+            task.ref,
+            "block",
+            actor="slack:U1",
+            run_id=None,
+            message="m",
+            force=True,
+        )
+
+
+def test_a_stop_request_never_reaches_a_later_run(enso_home: Paths, project_config: Config) -> None:
+    task = add(enso_home, project_config)
+    tasks.take(enso_home, project_config, "EN", "triage", run_id="r1", actor="job:default:dev")
+    running_run(enso_home, "r1")
+    request = tasks.request_stop(enso_home, task.ref, actor=USER, run_id=None, message="Stop that")
+    # The run ends on its own before any runner reads the request.
+    tasks.release(
+        enso_home, task.ref, actor="enso", run_id="r1", message="ended", reason="run_ended"
+    )
+    assert tasks.stop_request(enso_home, task.ref, "r1") is None
+    tasks.take(enso_home, project_config, "EN", "triage", run_id="r2", actor="job:default:dev")
+    running_run(enso_home, "r2")
+    assert tasks.stop_request(enso_home, task.ref, "r2") is None
+    assert tasks.stop_request(enso_home, task.ref, "r1") is None
+    assert not tasks.stopped(enso_home, request)
+    second = tasks.request_stop(enso_home, task.ref, actor=USER, run_id=None, message="Again")
+    assert (second.run_id, second.message) == ("r2", "Again")
+
+
 def test_release(enso_home: Paths, project_config: Config) -> None:
     task = add(enso_home, project_config)
     with pytest.raises(TaskError, match="EN-001 is not claimed"):
@@ -687,6 +770,119 @@ def test_refs_validate_kind_and_ignore_duplicates(enso_home: Paths, project_conf
             refs=[("BAD", "x")],
         )
     assert tasks.get(enso_home, task.ref).stage == "triage"  # nothing moved
+
+
+def test_create_attaches_refs_in_the_creating_transaction(
+    enso_home: Paths, project_config: Config
+) -> None:
+    task = add(
+        enso_home,
+        project_config,
+        refs=[("url", "https://example.test/1\n")],
+        unique_refs=[("ticket", "MC-123"), ("ticket", "MC-123")],
+    )
+    assert [(r.kind, r.value, r.actor) for r in tasks.refs(enso_home, task.ref)] == [
+        ("ticket", "MC-123", USER),
+        ("url", "https://example.test/1", USER),
+    ]
+    assert kinds(enso_home, task.ref) == ["ref", "ref", "created"]
+    for bad, reason in (([("Ticket", "x")], "not a ref kind"), ([("ticket", " ")], "is empty")):
+        for name in ("refs", "unique_refs"):
+            with pytest.raises(TaskError, match=reason):
+                add(enso_home, project_config, **{name: bad})
+    assert [t.ref for t in tasks.list_tasks(enso_home, all=True)] == ["EN-001"]
+
+
+def test_a_unique_ref_admits_one_unfinished_task(enso_home: Paths, project_config: Config) -> None:
+    first = add(enso_home, project_config, unique_refs=[("ticket", "MC-123")])
+    with pytest.raises(tasks.DuplicateRefError) as refused:
+        tasks.create(
+            enso_home,
+            project_config,
+            "MKT",  # the guard spans every project in the installation
+            "Again",
+            actor=USER,
+            refs=[("url", "https://example.test")],
+            unique_refs=[("ticket", "MC-999"), ("ticket", " MC-123\n")],
+        )
+    assert str(refused.value) == (
+        "unfinished task EN-001 (triage) already carries ticket:MC-123; nothing was created"
+    )
+    assert (refused.value.existing, refused.value.kind, refused.value.value) == (
+        first,
+        "ticket",
+        "MC-123",
+    )
+    assert [t.ref for t in tasks.list_tasks(enso_home, all=True)] == ["EN-001"]
+    with db.reader(enso_home) as con:  # the refused creation left no refs or events behind
+        assert con.execute("SELECT count(*) FROM _enso_task_refs").fetchone()[0] == 1
+    # The kind and the exact value both count; an ordinary ref never guards.
+    add(enso_home, project_config, unique_refs=[("ticket", "mc-123"), ("issue", "MC-123")])
+    add(enso_home, project_config, refs=[("ticket", "MC-123")])
+    # A ref attached afterwards blocks a later unique creation as well.
+    plain = add(enso_home, project_config, "Attached later")
+    tasks.add_ref(enso_home, plain.ref, "ticket", "MC-7", actor=USER, run_id=None)
+    with pytest.raises(tasks.DuplicateRefError, match=r"EN-004 \(triage\)"):
+        add(enso_home, project_config, unique_refs=[("ticket", "MC-7")])
+    # Blocked and backlog work is unfinished too.
+    tasks.move(
+        enso_home, project_config, plain.ref, "block", actor=USER, run_id=None, message="wait"
+    )
+    with pytest.raises(tasks.DuplicateRefError, match=r"EN-004 \(blocked\)"):
+        add(enso_home, project_config, unique_refs=[("ticket", "MC-7")])
+    add(enso_home, project_config, backlog=True, unique_refs=[("ticket", "MC-8")])
+    with pytest.raises(tasks.DuplicateRefError, match=r"EN-005 \(backlog\)"):
+        add(enso_home, project_config, unique_refs=[("ticket", "MC-8")])
+
+
+@pytest.mark.parametrize("ending", ["done", "cancelled"])
+def test_a_finished_task_does_not_hold_a_unique_ref(
+    enso_home: Paths, project_config: Config, ending: str
+) -> None:
+    first = add(enso_home, project_config, unique_refs=[("ticket", "MC-123")])
+    if ending == "cancelled":
+        tasks.move(
+            enso_home, project_config, first.ref, "drop", actor=USER, run_id=None, message="dup"
+        )
+    else:
+        while tasks.get(enso_home, first.ref).stage != "done":
+            advance(enso_home, project_config, first.ref)
+    assert tasks.get(enso_home, first.ref).stage == ending
+    second = add(enso_home, project_config, unique_refs=[("ticket", "MC-123")])
+    assert second.ref == "EN-002"
+    with pytest.raises(tasks.DuplicateRefError, match=r"EN-002 \(triage\)"):
+        add(enso_home, project_config, unique_refs=[("ticket", "MC-123")])
+
+
+def test_unique_ref_creation_is_one_check_and_insert_under_a_race(
+    enso_home: Paths, project_config: Config
+) -> None:
+    results: list[tasks.Task | tasks.DuplicateRefError] = []
+    lock = threading.Lock()
+    start = threading.Barrier(8)
+
+    def create(index: int) -> None:
+        start.wait()
+        outcome: tasks.Task | tasks.DuplicateRefError
+        try:
+            outcome = add(
+                enso_home, project_config, f"copy {index}", unique_refs=[("ticket", "MC-123")]
+            )
+        except tasks.DuplicateRefError as exc:
+            outcome = exc
+        with lock:
+            results.append(outcome)
+
+    threads = [threading.Thread(target=create, args=(index,)) for index in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    created = [item for item in results if isinstance(item, tasks.Task)]
+    refused = [item for item in results if isinstance(item, tasks.DuplicateRefError)]
+    assert len(created) == 1 and len(refused) == 7
+    assert {item.existing.ref for item in refused} == {created[0].ref}
+    assert [t.ref for t in tasks.list_tasks(enso_home, all=True)] == [created[0].ref]
 
 
 def test_note_can_flag_attention(enso_home: Paths, project_config: Config) -> None:
