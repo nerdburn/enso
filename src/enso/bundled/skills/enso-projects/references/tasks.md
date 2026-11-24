@@ -27,8 +27,19 @@ VALUE` or `advance --ref KIND:VALUE`. Use `enso task note REF TEXT --attention` 
 needs to look; omit `--attention` for ordinary context.
 
 Record out-of-scope work separately with `enso task add TITLE --project KEY --from REF`;
-use `--backlog` unless ready and `--after REF` for a dependency. Outside stage runs, tasks
+use `--backlog` unless ready and `--after REF` for a dependency. `add --ref KIND:VALUE`
+attaches evidence at creation; `--unique-ref KIND:VALUE` creates nothing when an unfinished
+task already carries that ref and names it, so use that task instead. Outside stage runs, tasks
 can be edited, resumed, or dropped. A live claim cannot be forced: wait for or stop its run.
+
+## Stop a running task
+
+When a person asks to stop, halt, or pause work a run is doing now (`task show` reports a
+claim), use `enso task stop REF --message "<why, in their words>"`. It ends only that run;
+never stop the service for one task. The task ends `blocked` with that reason, and stays
+there until `enso task resume REF`. Report the line it prints: `stopped`, still stopping, or
+that the run ended by itself first. If it says no run holds the task, use `block` or `drop`
+as the person intends. It is refused inside a stage run: block your own task instead.
 
 ## Act on a person's answer
 
@@ -40,9 +51,9 @@ When a person answers a task notice, find its task reference, act, and reply in 
 - QA passed: approve any edited tests first, then `enso task advance REF --message "QA passed" --approve DIGEST`, using the current input digest from `task show`.
 - QA found a problem: `enso task return REF --message "<what is wrong>"`.
 - Starts a parked task: `enso task advance REF --message "<the decision>"`.
-- Drops it: `enso task drop REF --message "<why>"`.
+- Drops it: `enso task drop REF --message "<why>"`; if a run holds it, `enso task stop` first.
 
-For a `failure` block, read `enso task show REF` and `enso workflow show REF --json`, fix the
+A `stopped` block is a person's own stop: resume it only when they ask. For a `failure` block, read `enso task show REF` and `enso workflow show REF --json`, fix the
 cause, then resume; `enso workflow retry REF --message` restores an exhausted budget.
 
 Do not rewrite a request to publish a plan or draft. Submit an output revision instead.

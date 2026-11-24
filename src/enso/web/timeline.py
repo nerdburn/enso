@@ -48,6 +48,7 @@ _RELEASE_TITLES = {"run_ended": "Run ended without a handoff", "deferred": "Defe
 _TITLES: dict[str, tuple[str, str, str | None]] = {
     "created": ("Task created", "muted", None),
     "taken": ("Starting work", "running", ""),
+    "stop_requested": ("Stop requested", "warning", None),
     "rules_approved": ("Rules approved", "ok", None),
     "workflow_reset": ("Budget reset", "muted", None),
     "workflow_recovered": ("Verification recovered", "warning", None),

@@ -241,24 +241,48 @@ def _release(paths: Paths, ref: str, run_id: str, message: str) -> tasks.Task:
 
 
 def _end(
-    paths: Paths, config: Config, ref: str, run_id: str, status: str, error: str = ""
+    paths: Paths,
+    config: Config,
+    ref: str,
+    run_id: str,
+    status: str,
+    error: str = "",
+    stop: tasks.StopRequest | None = None,
 ) -> tasks.Task:
     task = tasks.get(paths, ref)
     if task.claim_run_id != run_id:
         return task  # the agent handed off (or a person forced past the claim)
-    reason = f"run {run_id} ended ({status})" + (f": {error}" if error else " without a handoff")
-    workflows.interrupt(paths, config, ref, run_id, reason)
+    if stop is not None:
+        # The person's reason and identity become the block; see ``tasks.request_stop``.
+        workflows.interrupt(
+            paths, config, ref, run_id, stop.message, actor=stop.actor, block="stopped"
+        )
+        ended = f"run {run_id} stopped by {stop.actor}"
+    else:
+        reason = f"run {run_id} ended ({status})"
+        workflows.interrupt(
+            paths, config, ref, run_id, reason + (f": {error}" if error else " without a handoff")
+        )
+        ended = f"{reason} without a handoff"
     task = tasks.get(paths, ref)
     if task.claim_run_id != run_id:
         return task
-    return _release(paths, ref, run_id, f"run {run_id} ended ({status}) without a handoff")
+    return _release(paths, ref, run_id, ended)
 
 
 async def end(
-    paths: Paths, config: Config, stage: StageRun, run_id: str, status: str, error: str = ""
+    paths: Paths,
+    config: Config,
+    stage: StageRun,
+    run_id: str,
+    status: str,
+    error: str = "",
+    stop: tasks.StopRequest | None = None,
 ) -> tasks.Task:
     """Block an unaccepted transaction and release its claim after execution stopped."""
-    return await execution.run_sync(_end, paths, config, stage.task.ref, run_id, status, error)
+    return await execution.run_sync(
+        _end, paths, config, stage.task.ref, run_id, status, error, stop
+    )
 
 
 def release_orphans(paths: Paths, config: Config, run_id: str, message: str) -> list[str]:
