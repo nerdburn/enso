@@ -5,6 +5,8 @@ All notable changes to Enso are documented here, following
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-24
+
 ### Added
 
 - `enso task add` accepts `--ref KIND:VALUE` to attach refs as the task is created, and
