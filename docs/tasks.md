@@ -535,6 +535,13 @@ checks cannot be bypassed by moving or landing a task directly. A task's `done` 
 whatever its configured workflow establishes, such as a verified local integration, rather
 than a claim that it has been published.
 
+`enso task rebase REF` moves an unclaimed task's branch onto its base's current tip, for
+work picked up again after the base moved on, and trusts that tip as the task's start, so
+the acceptance-input guard still sees only the task's own changes. A conflict is aborted
+and changes nothing. A person runs it, or a project's lifecycle script for the task it was
+called for: `hooks["after:build"]` running it means each return to that stage starts from
+the current base. A run cannot rebase.
+
 One execution owner holds a task's worktree from preparation through agent work, checks,
 repairs, and worktree-using lifecycle hooks. Other tasks can run up to the configured project
 concurrency limit. The repository integration lock also coordinates different Enso homes.
@@ -597,6 +604,7 @@ enso task edit REF [--title T] [--body-file PATH|-] [--priority N] [--after REF]
 enso task note REF TEXT|- [--attention] [--workspace W]
 enso task ref REF KIND VALUE [--workspace W]
 enso task land REF [--workspace W]
+enso task rebase REF [--workspace W]
 enso task sweep [--project KEY] [--workspace W] [--all-workspaces]
 enso workflow show REF [--workspace W]
 enso workflow verify REF --message TEXT|- [--output-file PATH] [--route NAME] [--approve DIGEST] [--workspace W]

@@ -5,6 +5,13 @@ All notable changes to Enso are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- `enso task rebase REF` moves an unclaimed task's branch onto its base's current tip and
+  trusts that tip as the task's start, so edited-test checks still see only the task's own
+  changes. A person runs it, or a project's lifecycle script for its own task (for example
+  `hooks["after:build"]`, so work picked up again never builds on a stale base).
+
 ## [0.6.0] - 2026-11-24
 
 ### Added
