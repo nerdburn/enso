@@ -323,3 +323,54 @@ def test_land_waits_for_pending_lifecycle_events(
     code, _, err = run("land", "EN-1")
     assert code == 1 and "lifecycle" in err
     assert git(repo, "rev-parse", "HEAD").strip() != candidate
+
+
+def test_rebase_moves_an_unclaimed_task_onto_its_base_and_refuses_runs(
+    enso_home: Paths, repo_config: Config, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    add()
+    code, _, err = run("rebase", "EN-1")
+    assert code == 1 and err == "error: EN-001 has no worktree yet; it starts from its base\n"
+    info = worktrees.prepare(enso_home, repo_config.projects["EN"], "EN-001")
+    commit_file(info.path, "feature.py", "print(1)\n", "feat: one")
+    upstream = commit_file(repo, "other.py", "print(2)\n", "feat: elsewhere")
+
+    monkeypatch.setenv("ENSO_RUN_ID", "run1")
+    code, _, err = run("rebase", "EN-1")
+    assert code == 1 and "a run cannot rebase a task" in err
+    monkeypatch.delenv("ENSO_RUN_ID")
+
+    code, out, _ = run("rebase", "EN-1", "--json")
+    result = json.loads(out)
+    assert code == 0 and result["changed"] is True and result["base"] == "main"
+    assert git(info.path, "merge-base", "--is-ancestor", upstream, "HEAD") == ""
+    assert worktrees.lookup(enso_home, "EN-001")["start_revision"] == upstream  # type: ignore[index]
+    assert "Rebased onto main" in run("show", "EN-1")[1]
+    code, out, _ = run("rebase", "EN-1")
+    assert code == 0 and out.startswith("EN-001: already on main")
+
+
+def test_a_lifecycle_script_may_rebase_its_own_task(
+    enso_home: Paths, repo_config: Config, repo: Path
+) -> None:
+    add()
+    worktrees.prepare(enso_home, repo_config.projects["EN"], "EN-001")
+    with db.transaction(enso_home) as con:
+        for event_id, status in (("e1", "running"), ("e2", "pending")):
+            con.execute(
+                "INSERT INTO _enso_workflow_events VALUES (?,?,?,?,?,?)",
+                (event_id, "EN-001", None, status, 1, "{}"),
+            )
+    with pytest.raises(tasks.TaskError, match="pending lifecycle scripts"):
+        tasks.ensure_no_pending(enso_home, "EN-001")
+    with pytest.raises(tasks.TaskError, match="pending lifecycle scripts"):
+        tasks.ensure_no_pending(enso_home, "EN-001", calling_event="e2")  # not the running one
+    tasks.ensure_no_pending(enso_home, "EN-001", calling_event="e1")  # itself and later ones
+    with db.transaction(enso_home) as con:
+        con.execute(
+            "INSERT INTO _enso_workflow_events VALUES (?,?,?,?,?,?)",
+            ("e0", "EN-001", None, "failed", 3, "{}"),
+        )
+        con.execute("UPDATE _enso_workflow_events SET rowid=0 WHERE id='e0'")
+    with pytest.raises(tasks.TaskError, match="pending lifecycle scripts"):
+        tasks.ensure_no_pending(enso_home, "EN-001", calling_event="e1")  # an earlier one owed

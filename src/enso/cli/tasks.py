@@ -634,6 +634,59 @@ def task_land(ref: str, workspace: str | None = WORKSPACE, as_json: bool = JSON_
         typer.echo(f"landed {task.ref}: {base} is now at {head}")
 
 
+@task_app.command("rebase")
+def task_rebase(ref: str, workspace: str | None = WORKSPACE, as_json: bool = JSON_FLAG) -> None:
+    """Rebase an unclaimed task's branch onto its base's current tip.
+
+    For work picked up again after its base moved on: a person, or a project's
+    lifecycle script for the task it was called for (``hooks["after:build"]``). The task's
+    trusted start moves to the new base, so guards still see only the task's own changes.
+    A conflict changes nothing.
+    """
+    paths = Paths.from_env()
+    config = load(paths, as_json=as_json)
+    _scope(paths, config, workspace, ref=ref, as_json=as_json)
+    hook = os.environ.get("ENSO_EVENT_ID") if os.environ.get("ENSO_LIFECYCLE") else None
+    if tasks.in_run(os.environ) and not hook:
+        fail(["a run cannot rebase a task; a person or a lifecycle script does"], as_json=as_json)
+    try:
+        task = tasks.get(paths, ref)
+    except (tasks.TaskError, ValueError, OSError) as exc:
+        fail([str(exc)], as_json=as_json)
+    project = config.projects.get(task.project)
+    if project is None or project.repo is None:
+        fail([f"project {task.project} has no repository; nothing to rebase"], as_json=as_json)
+    if worktrees.lookup(paths, task.ref) is None:
+        fail([f"{task.ref} has no worktree yet; it starts from its base"], as_json=as_json)
+    try:
+        with worktrees.execution_context(paths, task.ref):
+            task = tasks.get(paths, ref)
+            if task.finished:
+                raise tasks.TaskError(f"{task.ref} is {task.stage}")
+            if task.claim_run_id is not None:
+                raise tasks.TaskError(f"{task.ref} is claimed by run {task.claim_run_id}")
+            tasks.ensure_no_pending(paths, task.ref, calling_event=hook)
+            head, base_rev, changed = worktrees.rebase(paths, project, task.ref)
+    except (tasks.TaskError, worktrees.WorktreeError) as exc:
+        fail([str(exc)], as_json=as_json)
+    base = (worktrees.lookup(paths, task.ref) or {}).get("base", "")
+    if changed:
+        with contextlib.suppress(tasks.TaskError):
+            tasks.note(
+                paths,
+                task.ref,
+                actor=tasks.actor_from_env(os.environ),
+                run_id=None,
+                message=f"Rebased onto {base} at {base_rev[:12]}.",
+            )
+    if as_json:
+        echo_json({"ok": True, "ref": task.ref, "base": base, "head": head, "changed": changed})
+    else:
+        typer.echo(
+            f"{task.ref}: {'rebased onto' if changed else 'already on'} {base} ({head[:12]})"
+        )
+
+
 @task_app.command("sweep")
 def task_sweep(
     project: str | None = typer.Option(None, "--project", help="One project; default all."),

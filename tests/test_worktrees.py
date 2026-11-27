@@ -597,3 +597,44 @@ def test_teardown_retries_are_bounded_and_operator_reset_allows_recovery(
         },
     )
     assert worktrees.sweep(enso_home, project) == ["EN-001"]
+
+
+def test_rebase_moves_branch_and_trusted_start_to_the_base_tip(
+    enso_home: Paths, project_config: Config, repo: Path
+) -> None:
+    project = project_for(project_config, repo)
+    info = worktrees.prepare(enso_home, project, "EN-001")
+    start = worktrees.lookup(enso_home, "EN-001")["start_revision"]  # type: ignore[index]
+    head, base, changed = worktrees.rebase(enso_home, project, "EN-001")
+    assert (head, base, changed) == (start, start, False)  # nothing moved: nothing to do
+
+    commit_file(info.path, "feature.py", "print(1)\n", "feat: one")
+    upstream = commit_file(repo, "tests/test_other.py", "assert True\n", "test: elsewhere")
+    head, base, changed = worktrees.rebase(enso_home, project, "EN-001")
+    assert changed and base == upstream != head
+    assert git(info.path, "log", "--format=%s", "-3").split("\n")[:3] == [
+        "feat: one",
+        "test: elsewhere",
+        "init",
+    ]
+    assert worktrees.lookup(enso_home, "EN-001")["start_revision"] == upstream  # type: ignore[index]
+    # The base's own test change is not the task's: diffing from the trusted start omits it.
+    assert git(info.path, "diff", "--name-only", upstream, "HEAD").split() == ["feature.py"]
+    assert worktrees.rebase(enso_home, project, "EN-001")[2] is False
+
+
+def test_rebase_aborts_on_conflict_and_refuses_a_dirty_worktree(
+    enso_home: Paths, project_config: Config, repo: Path
+) -> None:
+    project = project_for(project_config, repo)
+    info = worktrees.prepare(enso_home, project, "EN-001")
+    start = worktrees.lookup(enso_home, "EN-001")["start_revision"]  # type: ignore[index]
+    mine = commit_file(info.path, "README.md", "mine\n", "docs: mine")
+    commit_file(repo, "README.md", "theirs\n", "docs: theirs")
+    with pytest.raises(WorktreeError, match=r"conflicts: README\.md"):
+        worktrees.rebase(enso_home, project, "EN-001")
+    assert git(info.path, "rev-parse", "HEAD").strip() == mine
+    assert worktrees.lookup(enso_home, "EN-001")["start_revision"] == start  # type: ignore[index]
+    (info.path / "README.md").write_text("dirty\n")
+    with pytest.raises(WorktreeError, match=r"uncommitted changes: README\.md"):
+        worktrees.rebase(enso_home, project, "EN-001")

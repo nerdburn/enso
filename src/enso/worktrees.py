@@ -753,6 +753,42 @@ def finish_land(
     return candidate
 
 
+def rebase(paths: Paths, project: ProjectConfig, ref: str) -> tuple[str, str, bool]:
+    """Rebase the task's branch onto its base's current tip and trust that tip as its start.
+
+    For a task picked up again after its base moved on. The trusted start moves with the
+    branch, so a guard still sees only the task's own changes, never the base's. A conflict
+    is aborted and changes nothing. Returns the new head, the base revision, and whether
+    anything changed.
+    """
+    with landing_context(paths, project, ref):
+        record = _landing_record(paths, project, ref)
+        repo, path = Path(record["repo"]), Path(record["path"])
+        branch, base = record["branch"], record["base"]
+        if dirty := _unclean(path):
+            raise WorktreeError(f"worktree {path} has uncommitted changes: {', '.join(dirty)}")
+        target = _revision(repo, f"refs/heads/{base}")
+        before = _revision(path, "HEAD")
+        if _git(["merge-base", "--is-ancestor", target, "HEAD"], cwd=path, check=False)[0] != 0:
+            rc, output = _git(["rebase", target], cwd=path, check=False)
+            if rc != 0:
+                _, conflicts = _git(
+                    ["diff", "--name-only", "--diff-filter=U"], cwd=path, check=False
+                )
+                _git(["rebase", "--abort"], cwd=path, check=False)
+                files = ", ".join(conflicts.split()) or output.strip()[-500:]
+                raise WorktreeError(f"rebasing {branch} onto {base} conflicts: {files}")
+        head = _revision(path, "HEAD")
+        moved = record["start_revision"] != target
+        if moved:
+            with db.transaction(paths) as con:
+                con.execute(
+                    "UPDATE _enso_worktrees SET start_revision=?,updated_at=? WHERE ref=?",
+                    (target, db.now(), ref),
+                )
+        return head, target, moved or head != before
+
+
 def land(paths: Paths, project: ProjectConfig, ref: str) -> str:
     """Legacy no-check landing; configured workflow checks use the split acceptance API."""
     with landing_context(paths, project, ref):

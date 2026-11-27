@@ -860,9 +860,32 @@ def _check_pending_move(con: sqlite3.Connection, task: Task, move_id: str) -> No
         raise TaskError("pending lifecycle scripts must finish before another stage")
 
 
-def ensure_no_pending(paths: Paths, ref: str) -> None:
+def ensure_no_pending(paths: Paths, ref: str, *, calling_event: str | None = None) -> None:
+    """Refuse while lifecycle scripts are owed; a script may name itself as the caller.
+
+    The calling script's own delivery, and those queued after it, do not count.
+    """
     with db.reader(paths) as con:
-        if _pending(con, parse_ref(ref)):
+        if calling_event:
+            owed = con.execute(
+                "SELECT 1 FROM _enso_workflow_events WHERE task_ref=? "
+                "AND status IN ('pending','running','failed','uncertain') AND rowid < "
+                "COALESCE((SELECT rowid FROM _enso_workflow_events WHERE id=? AND task_ref=? "
+                "AND status='running'), 0) LIMIT 1",
+                (parse_ref(ref), calling_event, parse_ref(ref)),
+            ).fetchone()
+            pending = (
+                owed is not None
+                or con.execute(
+                    "SELECT 1 FROM _enso_workflow_events "
+                    "WHERE id=? AND task_ref=? AND status='running'",
+                    (calling_event, parse_ref(ref)),
+                ).fetchone()
+                is None
+            )
+        else:
+            pending = _pending(con, parse_ref(ref))
+        if pending:
             raise TaskError(
                 "pending lifecycle scripts must finish before another stage or integration"
             )
