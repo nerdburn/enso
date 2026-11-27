@@ -5,6 +5,8 @@ All notable changes to Enso are documented here, following
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-27
+
 ### Added
 
 - `enso task rebase REF` moves an unclaimed task's branch onto its base's current tip and
